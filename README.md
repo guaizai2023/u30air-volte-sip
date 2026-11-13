@@ -120,6 +120,28 @@ while len(inq) > MAXQ:
 
 ---
 
+## 前置：固件与音频栈
+
+这几块是整个项目最难找的材料，已打包在 [`firmware/`](firmware/)：
+
+| 材料 | 作用 | 缺了会怎样 |
+|---|---|---|
+| `agdsp.bin`（6,291,456 B） | AUDCP 固件，DSP 的"操作系统" | 全程无声 |
+| `luci-app-airsim-0.1.0-r23.apk` | 社区音频栈（音频模块 + 工具 + LuCI） | 没有 `/dev/snd`、没有 `mu300-voice` |
+| `airsim-install-r23.sh` | 官方安装脚本（验签 + 安装） | 手动装易漏依赖 |
+
+```sh
+curl -LO https://github.com/guaizai2023/u30air-volte-sip/raw/main/firmware/mu300-audio-kit-r23.tar.gz
+tar xzf mu300-audio-kit-r23.tar.gz && cd mu300-audio-kit-r23
+sh airsim-install-r23.sh --check     # 先干跑
+sh airsim-install-r23.sh --install   # 再安装
+```
+
+> **硬约束：语音只在 `5.4.254-gb50db5b6224c` 内核下可用。** 装前 `uname -r` 确认。
+> 细节、sha256 与来源见 [`firmware/README.md`](firmware/README.md)。
+
+---
+
 ## 部署
 
 ### 1. 文件
@@ -191,7 +213,7 @@ tail -f /tmp/bridge.log
 ## 已知限制
 
 - 只支持**呼出**；呼入未实现。
-- 依赖已落地的 `agdsp.bin` 与 Audio HAL（未包含在本仓库，见上游社区）。
+- 需先落地音频栈与 `agdsp.bin`（已打包在 [`firmware/`](firmware/)，锁定 5.4.254 内核）。
 - 有界队列在长时间通话中会丢掉少量音频，属于用"可听性"换"延迟上限"的权衡。
 - 未做 NAT / 公网暴露，仅限内网使用。
 
