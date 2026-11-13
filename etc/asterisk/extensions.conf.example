@@ -1,0 +1,40 @@
+[general]
+static=yes
+writeprotect=no
+clearglobalvars=no
+
+[from-internal]
+; 回音测试：拨 600
+exten => 600,1,Answer()
+ same => n,Wait(1)
+ same => n,Echo()
+ same => n,Hangup()
+
+; 标准 Echo 扩展 *43
+exten => *43,1,Answer()
+ same => n,Echo()
+ same => n,Hangup()
+
+; 分机互拨
+exten => 6001,1,Dial(PJSIP/6001,30)
+ same => n,Hangup()
+exten => 6002,1,Dial(PJSIP/6002,30)
+ same => n,Hangup()
+
+; ---- 手机号呼出：走本机 SIM 卡 + 双向音频桥 (AudioSocket) ----
+exten => _1XXXXXXXXXX,1,Answer()
+ same => n,System(echo ${EXTEN} > /tmp/bridge-target)
+ same => n,AudioSocket(${UNIQUEID},127.0.0.1:9092)
+ same => n,Hangup()
+
+; 短号（10086 等）
+exten => 10086,1,Answer()
+ same => n,System(echo ${EXTEN} > /tmp/bridge-target)
+ same => n,AudioSocket(${UNIQUEID},127.0.0.1:9092)
+ same => n,Hangup()
+
+; 兜底：未注册/未知号码
+exten => _X.,1,Answer()
+ same => n,Wait(1)
+ same => n,Playback(hello-world)
+ same => n,Hangup()
