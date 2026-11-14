@@ -290,6 +290,15 @@ def handle(conn):
 
     threading.Thread(target=sender, daemon=True).start()
 
+    # 清掉上一次异常中断留下的 aplay/arecord：它们会一直占着 pcmC1D5p，
+    # 让本次会话报 "Resource busy"、上下行全 0 字节（实测踩过一次）。
+    stale = sh(["sh", "-c", "pidof aplay arecord 2>/dev/null || true"], 5).strip()
+    if stale:
+        log("发现残留音频进程 %s，先清理" % stale)
+        sh(["sh", "-c", "kill $(pidof aplay arecord 2>/dev/null) 2>/dev/null || true"], 5)
+        sh(["mu300-voice", "audio", "stop"], 12)
+        time.sleep(0.5)
+
     t_setup = time.time()
     if not ensure_card():
         send_frame(conn, ERROR, b"no sound card")
@@ -349,7 +358,10 @@ def handle(conn):
 
     r = start_scene()
     if "did not start" in r or "Resource busy" in r:
-        log("场景启动失败，重启 DSP 后重试一次")
+        log("场景启动失败：先停场景、清残留，再重启 DSP")
+        sh(["mu300-voice", "audio", "stop"], 12)
+        sh(["sh", "-c", "kill $(pidof aplay arecord 2>/dev/null) 2>/dev/null || true"], 5)
+        time.sleep(0.5)
         for l in [x for x in sh(["mu300-audio-dsp", "start"], 120).strip().splitlines() if x.strip()][-2:]:
             log("  dsp start:", l)
         time.sleep(1)
