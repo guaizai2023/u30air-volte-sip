@@ -1,0 +1,21 @@
+; /etc/asterisk/manager.conf
+;
+; AMI（Asterisk Manager Interface）—— 呼入时用它发起呼叫。
+;
+; 为什么必须开 AMI：这台设备上的 Asterisk 是精简构建，
+; 模块目录里没有 res_clioriginate.so，`channel originate` 与旧的 `originate`
+; 命令都不存在，CLI 无法发起呼叫；AMI 是内建功能，只是默认关闭。
+;
+; 只监听回环地址，不对外暴露。
+
+[general]
+enabled = yes
+port = 5038
+bindaddr = 127.0.0.1
+displayconnects = no
+
+[mu300]
+secret = mu300ami2026
+read = all
+write = all
+permit = 127.0.0.1/255.255.255.255

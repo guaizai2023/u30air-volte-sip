@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""mu300 SIP 桥接 v13
+"""mu300 SIP 桥接 v14
+
+v14 新增呼入：对方拨打 SIM 号，SIP 分机振铃，接听后双向通话。
+  * 没有 /tmp/bridge-target 时按呼入处理：读 /tmp/volte-incoming 的主叫号码，
+    看 AT+CLCC 是 4(振铃)/0(已接通)，然后 ATA 接听，再走同一套音频通路。
+  * 呼出路径完全不变。
 
 v3 关键修复：
   * 采样率：上行写 16 kHz（8k 帧 ×2 线性插值），下行读 48 kHz（6:1 抽取成 8k）
@@ -19,6 +24,7 @@ import array, collections, fcntl, os, re, socket, struct, subprocess, threading,
 AUDIO, UUID, HANGUP, ERROR = 0x10, 0x01, 0x00, 0xFF
 PORT = 9092
 TARGET = "/tmp/bridge-target"
+INCOMING = "/tmp/volte-incoming"      # 守护进程写入的主叫号码（呼入用）
 LOG = "/tmp/bridge.log"
 CAP = ["arecord", "-D", "hw:1,16", "-f", "S16_LE", "-r", "48000", "-c", "1", "-t", "raw", "-q",
        "--fatal-errors"]      # 默认缓冲；出错即退出（xrun 后重启流会 panic，见 FINDINGS 24e）
@@ -198,7 +204,7 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", PORT))
     srv.listen(4)
-    log("bridge v13 listening on 127.0.0.1:%d (上行16k/下行48k)" % PORT)
+    log("bridge v14 listening on 127.0.0.1:%d (上行16k/下行48k)" % PORT)
     while True:
         conn, addr = srv.accept()
         log("asterisk connected from", addr)
@@ -222,11 +228,32 @@ def handle(conn):
     if os.path.exists(TARGET):
         num = open(TARGET).read().strip()
         os.unlink(TARGET)
+
+    incoming = False
     if not re.fullmatch(r"[0-9*#]{3,20}", num or ""):
-        log("没有有效目标号码:", repr(num))
-        send_frame(conn, ERROR, b"no target")
-        return
-    log("目标号码:", num)
+        # 没有目标号码 -> 可能是呼入（对方打这个号）。
+        # 守护进程 mu300-volte-in 在振铃时把主叫写进 /tmp/volte-incoming。
+        clip = ""
+        if os.path.exists(INCOMING):
+            try:
+                clip = open(INCOMING).read().strip()
+            except OSError:
+                clip = ""
+        st, ok = clcc_state()
+        if st == "4":                       # 来电振铃中，还没接
+            incoming = True
+            num = clip or "unknown"
+            log("呼入来电（振铃中）:", num, "| CLCC state=4")
+        elif st == "0":                     # 已经接通（例如别处已下发 ATA）
+            incoming = True
+            num = clip or "active"
+            log("呼入来电（已接通）:", num, "| CLCC state=0")
+        else:
+            log("没有有效目标号码，且当前没有来电:", repr(num), "clcc=", st)
+            send_frame(conn, ERROR, b"no target")
+            return
+    else:
+        log("目标号码:", num)
 
     # --- 一连上就按 20ms 节拍持续送音频，队列空就送静音 -------------------------------
     # 原因：SIM 侧建立通话要 5-6 s，之后 mu300-voice 还要若干秒才出音频；
@@ -268,24 +295,50 @@ def handle(conn):
         send_frame(conn, ERROR, b"no sound card")
         stop.set()
         return
-    log("音频就绪（%.1fs），开始拨号" % (time.time() - t_setup))
+    log("音频就绪（%.1fs）" % (time.time() - t_setup))
 
-    at("ATD%s;" % num, 15)
-    t0, active = time.time(), False
-    while time.time() - t0 < 35:
-        st, ok = clcc_state()
-        if st == "0":
-            active = True
-            break
-        if st is None and ok and time.time() - t0 > 5:
-            break
-        time.sleep(1)
-    if not active:
-        log("拨号未接通")
-        send_frame(conn, ERROR, b"no answer")
-        at("AT+CHUP", 6)
-        return
-    log("通话已接通（%.1fs）" % (time.time() - t0))
+    if incoming:
+        # 呼入：下发 ATA 接听，然后等通道真正变成 active。
+        # 必须在分机接听之后才 ATA —— 否则对方那边早就接通并开始计费了。
+        log("呼入：下发 ATA 接听")
+        at("ATA", 12)
+        t0, active = time.time(), False
+        while time.time() - t0 < 12:
+            st, ok = clcc_state()
+            if st == "0":
+                active = True
+                break
+            time.sleep(0.5)
+        if not active:
+            log("呼入：接听失败，挂断")
+            send_frame(conn, ERROR, b"answer failed")
+            at("AT+CHUP", 6)
+            return
+        log("呼入已接通（%.1fs）" % (time.time() - t0))
+    else:
+        # 防撞车：如果此刻正好有来电在振铃（CLCC=4），说明呼出和呼入会同时占用
+        # 同一条音频通路，互相踩，结果是两边都没声音。这种情况直接放弃呼出。
+        st_now, _ = clcc_state()
+        if st_now == "4":
+            log("检测到来电正在振铃，放弃本次呼出（避免与呼入撞车）")
+            send_frame(conn, ERROR, b"incoming call active")
+            return
+        at("ATD%s;" % num, 15)
+        t0, active = time.time(), False
+        while time.time() - t0 < 35:
+            st, ok = clcc_state()
+            if st == "0":
+                active = True
+                break
+            if st is None and ok and time.time() - t0 > 5:
+                break
+            time.sleep(1)
+        if not active:
+            log("拨号未接通")
+            send_frame(conn, ERROR, b"no answer")
+            at("AT+CHUP", 6)
+            return
+        log("通话已接通（%.1fs）" % (time.time() - t0))
     def start_scene():
         _t = time.time()
         out = sh(["mu300-voice", "audio", "start", "dsp"], 45)
@@ -306,7 +359,10 @@ def handle(conn):
             send_frame(conn, ERROR, b"scene failed")
             at("AT+CHUP", 6)
             return
-    time.sleep(0.8)
+    # 呼入时 DSP 刚被 ATA 唤醒，场景启动耗时波动很大（实测 0.3~1.3 s）。
+    # 等久一点再开 aplay：DSP 还没出声就写会 underrun，而 aplay 带 --fatal-errors
+    # 会直接退出，整个会话被误判成"通话结束"（第一次呼入几秒就断就是这个原因）。
+    time.sleep(1.8 if incoming else 0.8)
 
     cap = spawn(CAP, CAP_FB, "arecord", "out")
     play = spawn(PLAY, PLAY_FB, "aplay", "in")
@@ -455,9 +511,15 @@ def handle(conn):
     # 顺序很重要：先挂断电话，再收场景，最后关 PCM。
     # 反过来（先杀 arecord/aplay 再挂断）会把 DSP 的语音流掐在半路，
     # 之后 DSP 进入深层睡眠且唤不醒，下一次通话必然失败。
+    #
+    # v14.1：改为无条件 CHUP。原来只在 CLCC 查得到状态时才挂断，
+    # 一旦这次查询超时（返回 None），对面就一直听回铃，直到运营商自己超时
+    # —— 表现就是"我这边挂了，对面半天才断"。
     st, _ = clcc_state()
-    if st is not None:
-        at("AT+CHUP", 6)
+    log("结束流程：CLCC=%s，下发 AT+CHUP" % st)
+    out = at("AT+CHUP", 10)
+    tail_out = [x for x in (out or "").strip().splitlines() if x.strip()]
+    log("  AT+CHUP ->", (tail_out[-1][:60] if tail_out else "(无输出)"))
     try:
         send_frame(conn, HANGUP, b"")
     except OSError:
