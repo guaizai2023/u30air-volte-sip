@@ -8,15 +8,18 @@
 
 ---
 
-## 当前进度（2026-11-13）
+## 当前进度（2026-11-14）
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| SIP 服务器（Asterisk） | ✅ 已跑通 | 23.1.0，`192.168.77.1:5060/udp`，开机自启 |
+| SIP 服务器（Asterisk） | ✅ 已跑通 | 23.1.0，`192.168.77.1:5060`（UDP + TCP），开机自启 |
 | 分机注册 / 互拨 / 回音测试 | ✅ | 6001、6002，`600` 与 `*43` 为 Echo |
-| **呼出：SIP → 手机号 → 双向语音** | ✅ **可用** | 本文档主角 |
-| 双向语音延迟 | ✅ 已可接受 | 单向约 200~300 ms（详见 `docs/02-latency-investigation.md`） |
-| **呼入：别人打进来 → SIP 分机振铃** | ⬜ **下一阶段** | 方案已定，见文末 Roadmap |
+| **呼出：SIP → 手机号 → 双向语音** | ✅ **可用** | |
+| **呼入：外部拨打 SIM 号 → SIP 分机振铃 → 双向语音** | ✅ **可用** | 见 [`docs/03-inbound-call.md`](docs/03-inbound-call.md) |
+| 双向语音延迟 | ✅ 已可接受 | 单向约 200~300 ms（详见 [`docs/02`](docs/02-latency-investigation.md)） |
+| 挂断同步（双向） | ✅ | 任一方挂断，另一侧 1~2 秒内结束 |
+| **长时间保活（iOS 后台）** | ⬜ **待测** | 需锁屏放置数小时观察 |
+| **Android 端** | ⬜ **待测** | 尚未验证 |
 
 ---
 
@@ -159,8 +162,26 @@ chmod +x /usr/bin/mu300-bridge.py /etc/init.d/mu300-bridge
 
 ```sh
 scp etc/asterisk/extensions.conf.example root@192.168.77.1:/etc/asterisk/extensions.conf
+scp etc/asterisk/manager.conf.example    root@192.168.77.1:/etc/asterisk/manager.conf
 asterisk -rx "dialplan reload"
+asterisk -rx "manager reload"
 ```
+
+> **呼入必须开 AMI**：这台 Asterisk 是精简构建，没有 `res_clioriginate`，
+> CLI 的 `channel originate` 不存在，只能通过 AMI 发起呼叫。
+
+### 3. 呼入服务
+
+```sh
+scp tools/mu300-volte-in.py   root@192.168.77.1:/usr/bin/mu300-volte-in.py
+scp etc/init.d/mu300-volte-in root@192.168.77.1:/etc/init.d/mu300-volte-in
+chmod +x /usr/bin/mu300-volte-in.py /etc/init.d/mu300-volte-in
+/etc/init.d/mu300-volte-in enable
+/etc/init.d/mu300-volte-in start
+```
+
+守护启动时会自动下发 `AT+CLIP=1`（来电显示），否则振铃时不带主叫号码。
+完整说明见 [`docs/03-inbound-call.md`](docs/03-inbound-call.md)。
 
 关键拨号规则（手机号 → 写目标号 → 交给 AudioSocket）：
 
@@ -171,7 +192,7 @@ exten => _1XXXXXXXXXX,1,Answer()
  same => n,Hangup()
 ```
 
-### 3. 验证
+### 4. 验证
 
 ```sh
 # 本机，与设备同网段
@@ -181,7 +202,7 @@ SIP_TARGET=600 python3 tools/sip_verify.py
 
 或用任意 SIP 客户端注册 `6001` / `u30air-6001`，拨 `600` 听回音，拨手机号打电话。
 
-### 4. 日志
+### 5. 日志
 
 ```sh
 tail -f /tmp/bridge.log
@@ -212,25 +233,38 @@ tail -f /tmp/bridge.log
 
 ## 已知限制
 
-- 只支持**呼出**；呼入未实现。
+- **分机必须在线**：iOS 会把后台的 VoIP App 挂起，挂起后 INVITE 没人应答，表现就是"不响"。
+  需在软电话里打开 Force Background / Allow VoIP Calls，并把传输改成 **TCP**。
+- 同一时刻不支持呼入与呼出并行（两者抢同一条 DSP 音频通路，呼出会被拒绝）。
+- 只支持一路并发通话。
+- 一通来电最多等 25 秒，超时自动挂断。
 - 需先落地音频栈与 `agdsp.bin`（已打包在 [`firmware/`](firmware/)，锁定 5.4.254 内核）。
 - 有界队列在长时间通话中会丢掉少量音频，属于用"可听性"换"延迟上限"的权衡。
 - 未做 NAT / 公网暴露，仅限内网使用。
 
 ---
 
-## Roadmap：呼入（下一阶段）
+## 呼入（已实现）
 
-目标：别人拨打 SIM 卡号码 → SIP 分机振铃 → 接听后双向通话。
+目标已达成：别人拨打 SIM 卡号码 → SIP 分机振铃 → 接听后双向通话。
 
-计划路径：
+实现要点（细节与踩坑记录见 [`docs/03-inbound-call.md`](docs/03-inbound-call.md)）：
 
-1. 用 `mu300-at` 订阅 URC，监听 `RING` / `+CLIP`，拿到主叫号码；
-2. 触发 Asterisk `originate`，呼叫指定分机（如 6001）；
-3. 分机接听后，把这条 VoLTE 通话接入同一个 AudioSocket 桥接（复用现有 `handle()`）；
-4. 分机拒接/超时则 `AT+CHUP` 挂断。
+1. `mu300-volte-in.py` **只读跟随** `/run/mu300-at/urc/stty_nr0.log`，捕获 `+CRING` / `+CLIP`；
+   （`mu300-atd` 是单读者模型，不能独占 AT 通道，所以只能读它写好的 URC 日志）
+2. 用 **AMI** `Action: Originate` 呼叫分机——该 Asterisk 无 `res_clioriginate`，CLI 无法发起呼叫；
+3. 分机接听后通道直接进入 `AudioSocket`，桥接检测到 `AT+CLCC=4`（振铃中）后下发 `ATA` 接听 VoLTE；
+   **必须先等分机接听再 ATA**，否则对方提前计费；
+4. 任一方挂断都立即同步：收到 `^CEND` → 挂掉分机通道；分机挂断 → 无条件 `AT+CHUP`。
 
-需要一个常驻的 URC 监听进程（`mu300-atd` 已是单读者模型，需在其上做分发），预计改动集中在 `bridge.py` 的会话入口，DSP 与音频部分可完全复用。
+## 下一步：还需要验证什么
+
+| 项目 | 说明 |
+|---|---|
+| **长时间保活（iOS）** | 锁屏放置 30 分钟 / 2 小时 / 隔夜，分别拨入，看是否仍能响。iOS 会回收后台 VoIP App，这是目前最大的不确定性 |
+| **Android 端** | 尚未在 Android 软电话上验证。Android 可用前台服务常驻，预期比 iOS 稳，但需实测确认 |
+
+测试机：**iPhone 16e（美版无锁，iOS 27.2.1）**，软电话 PortSIP UC 12.4.6。
 
 ---
 

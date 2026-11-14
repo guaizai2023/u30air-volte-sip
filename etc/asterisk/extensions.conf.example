@@ -24,17 +24,30 @@ exten => 6002,1,Dial(PJSIP/6002,30)
 ; ---- 手机号呼出：走本机 SIM 卡 + 双向音频桥 (AudioSocket) ----
 exten => _1XXXXXXXXXX,1,Answer()
  same => n,System(echo ${EXTEN} > /tmp/bridge-target)
- same => n,AudioSocket(${UNIQUEID},127.0.0.1:9092)
+ same => n,AudioSocket(6d7f8a3e-4bcd-4e2f-9a01-0123456789ab,127.0.0.1:9092)
  same => n,Hangup()
 
 ; 短号（10086 等）
 exten => 10086,1,Answer()
  same => n,System(echo ${EXTEN} > /tmp/bridge-target)
- same => n,AudioSocket(${UNIQUEID},127.0.0.1:9092)
+ same => n,AudioSocket(6d7f8a3e-4bcd-4e2f-9a01-0123456789ab,127.0.0.1:9092)
  same => n,Hangup()
 
 ; 兜底：未注册/未知号码
 exten => _X.,1,Answer()
  same => n,Wait(1)
  same => n,Playback(hello-world)
+ same => n,Hangup()
+
+; ---- VoLTE 呼入：对方打 SIM 号 -> SIP 分机振铃 -> 接听后接音频桥 ----
+; 由 mu300-volte-in 监听 RING 后 originate Local/s@volte-in 触发
+[volte-in]
+exten => s,1,NoOp(VoLTE incoming call)
+ same => n,Dial(PJSIP/6001,25)
+ same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?answered:missed)
+ same => n(answered),NoOp(extension answered, start audio bridge)
+ same => n,AudioSocket(6d7f8a3e-4bcd-4e2f-9a01-0123456789ab,127.0.0.1:9092)
+ same => n,Hangup()
+ same => n(missed),NoOp(no answer, hang up VoLTE)
+ same => n,System(mu300-at -t 6 "AT+CHUP")
  same => n,Hangup()
