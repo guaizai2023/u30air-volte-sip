@@ -41,7 +41,7 @@ RING_TIMEOUT = 25                        # 与 [volte-in] 里 Dial 的 25 秒对
 YAK_PUSH_URL = os.environ.get("MU300_YAK_PUSH_URL", "https://push.yakteam.com/v1/notify")
 YAK_TOKEN_FILE = os.environ.get("MU300_YAK_TOKEN_FILE", "/etc/mu300/yak-push.token")
 YAK_WAKE_MIN = float(os.environ.get("MU300_YAK_WAKE_MIN", "0.8"))   # 推完先等这么久再查
-YAK_WAIT_MAX = float(os.environ.get("MU300_YAK_WAIT_MAX", "8.0"))   # 等分机注册的上限
+YAK_WAIT_MAX = float(os.environ.get("MU300_YAK_WAIT_MAX", "15.0"))  # 等分机注册的上限
 YAK_SIP_DOMAIN = os.environ.get("MU300_YAK_DOMAIN", "192.168.77.1")
 
 state = {"busy": False, "clip": "", "ring_at": 0.0, "triggered": False,
@@ -212,7 +212,17 @@ def trigger():
     # ① 先推：iOS 可能早就把这 App 挂起了，不推的话 INVITE 发过去没人处理，
     #    用户连未接记录都看不到（实测过）。
     if yak_notify(num, "voip"):
-        wait_registered()               # 轮询等它重新注册，注册好立刻继续
+        if not wait_registered():
+            # 分机始终没注册上来，这时候发 INVITE 只会让 Asterisk 报
+            # "Could not create dialog to invalid URI"，对方听到的是一通空响。
+            # 不如放弃，改推一条漏接通知。
+            log("分机未注册，放弃本次呼叫")
+            at("AT+CHUP", 6)
+            with lock:
+                num2 = state.get("clip") or num
+            yak_notify(num2, "missed")
+            reset()
+            return
 
     # ② 再叫分机
     log("呼叫 SIP 分机", EXT)
