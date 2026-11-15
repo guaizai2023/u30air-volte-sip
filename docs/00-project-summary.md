@@ -262,6 +262,7 @@ chmod 600 /etc/mu300/yak-push.token
 | 同一通来电被叫了两次 | `watchdog` 判据太激进，CLCC 偶发超时就复位 | 改为连续 12 秒无通话才复位；振铃时先现场查 CLCC |
 | 我挂了，对面半天才断 | 结束流程写成 `if clcc_state() is not None` 才发 CHUP，查询超时就根本不挂断 | **无条件** `AT+CHUP` |
 | 对方挂了，分机还在响 | 只清了本地状态，没终止 Asterisk 上仍停在振铃的 `PJSIP/6001-*` 通道 | 收到挂断通知后 `channel request hangup` 逐个挂掉 |
+| 对方挂了分机继续响，**接着下一通直接打不进来** | 模组有时不发 `^CEND`，VoLTE 侧留成**假振铃**（`AT+CLCC` 一直返回 state=4），这通"幽灵来电"占着线路，新来电被拒 | ①振铃期间每 1.5 s 查 CLCC，来电消失就挂断分机；②25 s 兜底改成「**非已接通**就 CHUP + 挂通道」，不能再按 `state==4` 判断（查询返回空会整段跳过） |
 | 某一通完全没声音 | 同一时刻既在呼出又在呼入，两路抢同一条 DSP 通路 | 呼出前查 `AT+CLCC`，发现 state=4 就拒绝呼出 |
 | AMI 连不上，报 `LookupError: unknown encoding: idna` | 设备上的 Python 缺 `idna` 编码器，`socket.create_connection` 走域名解析直接崩 | 用 `socket(AF_INET)+connect((ip, port))` 直连，或用 `curl` |
 
