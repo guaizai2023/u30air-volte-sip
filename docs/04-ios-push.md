@@ -64,12 +64,17 @@ Content-Type: application/json
 改 `tools/mu300-volte-in.py`，在发起呼叫前插入一步推送：
 
 ```
-检测到 +CRING → 收集 +CLIP → POST notify(type=voip) → 等 1.6 s → AMI originate 呼叫分机
-                                ↑                      ↑
-                          唤醒手机           给 App 重新 REGISTER 的时间
+检测到 +CRING → 收集 +CLIP → POST notify(type=voip) → 轮询注册(≤8 s) → AMI originate 呼叫分机
+                                ↑                          ↑
+                          唤醒手机              注册一回来就立刻呼叫
 ```
 
 **顺序不能反**。先叫后推的话，INVITE 会发给那个已经僵死的旧地址，照样失败。
+
+**为什么是轮询而不是固定等待**：App 被系统杀掉时，从推送到达至重新 REGISTER 要一两秒
+（实测推送返回后 1.6 s 才注册上，含 HTTPS 请求总耗时 3.9 s）。固定 sleep 会在它还没注册完时
+就把 INVITE 发出去。改成轮询 `pjsip show contacts` 后：注册好立刻走，最坏等 8 秒；
+而 App 本来就活着时第一次检查就通过，几乎不增加延迟。
 
 无人接听（25 秒超时）时再补一条 `type=missed`，锁屏上至少能看到漏接记录。
 

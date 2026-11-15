@@ -118,7 +118,7 @@ SIP 分机拨 138xxxxxxxx
                         ▼
                 mu300-volte-in.py
                   │  ① POST push.yakteam.com/v1/notify   ← 唤醒手机
-                  │  ② 等 1.6 s
+                  │  ② 轮询注册状态（≤8 s，注册即走）
                   │  ③ AMI Originate → PJSIP/6001，接听后执行 AudioSocket
                   ▼
               Asterisk ──INVITE──> SIP 分机响铃
@@ -272,7 +272,7 @@ chmod 600 /etc/mu300/yak-push.token
 | 锁屏 1~2 小时后收不到，**连通话记录都没有** | iOS 冻结了后台 App；socket 还在，App 不处理 INVITE | 必须有推送，见下一行 |
 | 怎么才有推送 | Asterisk 无 RFC 8599；PortSIP 的推送绑死 PortSIP PBX | 用 Yak Phone（Pro）的中继接口，由设备在振铃时主动 POST |
 | 「显示在线」但打不通 | TCP 连接由系统维持，端口几小时不变，但 App 已被挂起 | **不能用注册状态判断能否接电话**，只能靠实际拨测 |
-| AMI/推送都发了手机还是不响 | 顺序反了：先叫后推，INVITE 发给了僵死的旧地址 | **先推 → 等 1.6 s 让 App 重注册 → 再 originate** |
+| AMI/推送都发了手机还是不响 | ①顺序反了（先叫后推）；②App 被杀，1.6 s 内还没注册完 | **先推 → 轮询 `pjsip show contacts` 直到注册上（≤8 s）→ 再 originate** |
 
 ---
 
