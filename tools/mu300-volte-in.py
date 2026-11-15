@@ -144,20 +144,52 @@ def hangup_later(my_ts):
     """25 秒还没接通就挂断，避免对方一直听回铃。
 
     带上是哪一次的标记：如果这期间已经换成新的一通来电，就别去挂断它。
+
+    判据用「不是已接通」而不是「等于振铃」：实测 CLCC 查询偶尔返回空，
+    按 `st == 4` 判断会整段跳过，结果我方分机一直响到 Asterisk 超时，
+    更糟的是 VoLTE 侧被留成假振铃——那通假来电占着线路，下一通直接打不进来。
     """
     time.sleep(RING_TIMEOUT + 2)
     with lock:
         if state.get("triggered_at") != my_ts:
             return
     st = clcc_state()
-    if st == 4:
-        log("呼入无人接听，挂断 VoLTE")
+    if st != 0:                       # None=已挂断、4=还在响，都不该继续占着
+        log("呼入未接通（CLCC=%s），清理并挂断", st)
         at("AT+CHUP", 6)
-        # 补一条漏接通知，锁屏上至少能看到有人打过
+        hangup_extension()            # 同时把还在响的分机通道掐掉
         with lock:
             num = state.get("clip") or "unknown"
         yak_notify(num, "missed")
         reset()
+
+
+def ring_watchdog(my_ts):
+    """振铃期间盯住 CLCC：主叫一旦挂断，立刻把还在响的分机挂掉。
+
+    原来只靠 URC 的 `^CEND` 感知挂断，但模组有时不发、或发得比预期晚，
+    结果主叫都挂了这边还在响十几秒。更严重的是 VoLTE 侧会留下"假振铃"
+    （CLCC 一直停在 4），后续来电全部被拒绝，表现为"打不进去"。
+    """
+    time.sleep(1.2)
+    while True:
+        with lock:
+            if state.get("triggered_at") != my_ts:
+                return                        # 已经换了一通
+        st = clcc_state()
+        if st == 0:
+            return                            # 已接通，交给正常通话流程
+        if st is None:
+            time.sleep(1.0)                   # 再确认一次，避免 AT 偶发超时误判
+            with lock:
+                if state.get("triggered_at") != my_ts:
+                    return
+            if clcc_state() is None:
+                log("来电已消失（主叫挂断），挂断分机")
+                hangup_extension()
+                reset()
+                return
+        time.sleep(1.5)
 
 
 def trigger():
@@ -192,6 +224,7 @@ def trigger():
         reset()
         return
     threading.Thread(target=hangup_later, args=(ts,), daemon=True).start()
+    threading.Thread(target=ring_watchdog, args=(ts,), daemon=True).start()
 
 
 def reset():
