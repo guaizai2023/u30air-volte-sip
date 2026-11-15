@@ -332,9 +332,17 @@ def handle(conn):
             log("检测到来电正在振铃，放弃本次呼出（避免与呼入撞车）")
             send_frame(conn, ERROR, b"incoming call active")
             return
-        at("ATD%s;" % num, 15)
+        _t_atd = time.time()
+        at("ATD%s;" % num, 6)          # 发起就行，不必等它返回"接通"
+        log("  ATD 耗时 %.1fs" % (time.time() - _t_atd))
         t0, active = time.time(), False
         while time.time() - t0 < 35:
+            if stop.is_set():
+                # SIP 侧已经断了（用户挂断），不能继续让对方响 —— 实测挂断后
+                # 这里还在等 CLCC，对方又多响了近 20 秒。
+                log("SIP 侧已断开（用户挂断），中止拨号")
+                at("AT+CHUP", 6)
+                return
             st, ok = clcc_state()
             if st == "0":
                 active = True
