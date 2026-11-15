@@ -151,8 +151,8 @@ def hangup_later(my_ts):
     """
     time.sleep(RING_TIMEOUT + 2)
     with lock:
-        if state.get("triggered_at") != my_ts:
-            return
+        if state.get("triggered_at") != my_ts or not state["busy"]:
+            return                    # 已经换了一通，或本通早已结束
     st = clcc_state()
     if st != 0:                       # None=已挂断、4=还在响，都不该继续占着
         log("呼入未接通（CLCC=%s），清理并挂断", st)
@@ -174,15 +174,15 @@ def ring_watchdog(my_ts):
     time.sleep(1.2)
     while True:
         with lock:
-            if state.get("triggered_at") != my_ts:
-                return                        # 已经换了一通
+            if state.get("triggered_at") != my_ts or not state["busy"]:
+                return                        # 已经换了一通，或本通已收场
         st = clcc_state()
         if st == 0:
             return                            # 已接通，交给正常通话流程
         if st is None:
             time.sleep(1.0)                   # 再确认一次，避免 AT 偶发超时误判
             with lock:
-                if state.get("triggered_at") != my_ts:
+                if state.get("triggered_at") != my_ts or not state["busy"]:
                     return
             if clcc_state() is None:
                 log("来电已消失（主叫挂断），挂断分机")
