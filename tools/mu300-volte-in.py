@@ -40,7 +40,8 @@ RING_TIMEOUT = 25                        # 与 [volte-in] 里 Dial 的 25 秒对
 # 这正是 PortSIP 做不到的地方（它的推送绑死在 PortSIP PBX 上）。
 YAK_PUSH_URL = os.environ.get("MU300_YAK_PUSH_URL", "https://push.yakteam.com/v1/notify")
 YAK_TOKEN_FILE = os.environ.get("MU300_YAK_TOKEN_FILE", "/etc/mu300/yak-push.token")
-YAK_WAKE_DELAY = float(os.environ.get("MU300_YAK_WAKE_DELAY", "1.6"))
+YAK_WAKE_MIN = float(os.environ.get("MU300_YAK_WAKE_MIN", "0.8"))   # 推完先等这么久再查
+YAK_WAIT_MAX = float(os.environ.get("MU300_YAK_WAIT_MAX", "8.0"))   # 等分机注册的上限
 YAK_SIP_DOMAIN = os.environ.get("MU300_YAK_DOMAIN", "192.168.77.1")
 
 state = {"busy": False, "clip": "", "ring_at": 0.0, "triggered": False,
@@ -179,7 +180,7 @@ def trigger():
     # ① 先推：iOS 可能早就把这 App 挂起了，不推的话 INVITE 发过去没人处理，
     #    用户连未接记录都看不到（实测过）。
     if yak_notify(num, "voip"):
-        time.sleep(YAK_WAKE_DELAY)      # 等 App 被唤醒并重新 REGISTER
+        wait_registered()               # 轮询等它重新注册，注册好立刻继续
 
     # ② 再叫分机
     log("呼叫 SIP 分机", EXT)
@@ -272,6 +273,34 @@ def yak_notify(caller, kind="voip", call_id=None):
     except Exception as e:                                # noqa: BLE001
         log("  Yak 推送异常:", repr(e))
         return False
+
+
+def extension_registered():
+    """分机现在在 Asterisk 上有没有 contact。"""
+    try:
+        r = subprocess.run(["asterisk", "-rx", "pjsip show contacts"],
+                           capture_output=True, text=True, timeout=6)
+        return ("%s/" % EXT) in (r.stdout or "")
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+def wait_registered():
+    """推送之后等分机重新注册上来，注册好就立刻返回。
+
+    为什么不能固定 sleep：App 被系统杀掉时，从收到推送到重新 REGISTER 要好几秒，
+    固定等 1.6 s 会在它还没注册完就把 INVITE 发出去，照样落空（实测见过）。
+    而 App 本来就活着时，第一次检查就已注册，几乎不增加延迟。
+    """
+    t0 = time.time()
+    time.sleep(YAK_WAKE_MIN)
+    while time.time() - t0 < YAK_WAIT_MAX:
+        if extension_registered():
+            log("  分机已注册（等待 %.1fs）" % (time.time() - t0))
+            return True
+        time.sleep(0.4)
+    log("  分机在 %.0fs 内未注册上，仍尝试呼叫" % YAK_WAIT_MAX)
+    return False
 
 
 def hangup_extension():
