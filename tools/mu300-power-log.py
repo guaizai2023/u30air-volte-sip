@@ -82,13 +82,16 @@ def sample():
 
 
 def state_of(s):
+    """插电时的三种状态。
+
+    判满用电压而不是电量百分比：这台机器的电量计虚高，3.84 V（实际约 45%）就报 100%，
+    按百分比判满会在刚开始充的时候就记成 full（实测 09:58 就误报了）。
+    锂电池 4.15 V 以上且电流降下来，才算真的充满。
+    """
     if not s["plugged"]:
         return "discharging"
-    try:
-        if int(s["cap"]) >= 100:
-            return "full"
-    except (TypeError, ValueError):
-        pass
+    if s["volt"] >= 4.15 and s["cur"] < 150:
+        return "full"
     return "charging" if s["cur"] > 20 else "plugged"
 
 
