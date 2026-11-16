@@ -54,7 +54,27 @@ def number(path, scale=1.0, default=0.0):
 
 def sample():
     """取一次电量快照。电量优先用 fgu，缺失时退回 battery。"""
-    cap = read(FGU + "/capacity") or read(BAT + "/capacity", "?")
+def read_capacity():
+    """电量百分比（0~100）。
+
+    踩过的坑：`sc27xx-fgu/capacity` 靠不住——它和 cycle_count 几乎同值
+    （实测 978 vs 985），充满之后会溢出成三位数，日志因此写进了一堆 cap=985%。
+    `battery/capacity` 才是驱动聚合出来的正确百分比，所以优先用它，
+    并且只接受 0~100 的读数，异常值直接跳过。
+    """
+    for path in (BAT + "/capacity", FGU + "/capacity"):
+        try:
+            n = int(read(path))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= n <= 100:
+            return str(n)
+    return "?"
+
+
+def sample():
+    """取一次电量快照。"""
+    cap = read_capacity()
     volt = number(FGU + "/voltage_now", 1e6) or number(BAT + "/voltage_now", 1e6)
     cur = number(BAT + "/current_now", 1000.0) or number(FGU + "/current_now", 1000.0)
     plugged = read(USB + "/online", "0") == "1"
